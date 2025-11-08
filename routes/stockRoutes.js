@@ -186,10 +186,10 @@ router.get('/:ticker', async (req, res) => {
 
     // Case-insensitive search for ticker
     // Try common field name variations
-    const tickerRegex = new RegExp(`^${ticker}$`, 'i');
+    const tickerRegex = new RegExp(`^${ticker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     
-    // Search in multiple possible field names
-    const stock = await StockRow.findOne({
+    // First, try to find by ticker/symbol fields (if they exist in the data)
+    let stock = await StockRow.findOne({
       $or: [
         { ticker: tickerRegex },
         { Ticker: tickerRegex },
@@ -202,18 +202,54 @@ router.get('/:ticker', async (req, res) => {
       ]
     });
 
+    // If not found by ticker, try searching by name (since data doesn't have ticker field)
+    // This allows users to search by company name when using ticker endpoint
+    if (!stock) {
+      const nameRegex = new RegExp(ticker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      stock = await StockRow.findOne({
+        $or: [
+          { Name: nameRegex },
+          { name: nameRegex },
+          { NAME: nameRegex }
+        ]
+      });
+    }
+
+    // If still not found, try fuzzy match by name
+    if (!stock) {
+      const allStocks = await StockRow.find({}).lean();
+      const searchTerm = ticker.toLowerCase();
+      
+      const stocksWithScore = allStocks.map(stockItem => {
+        const stockName = (stockItem.Name || stockItem.name || '').toLowerCase();
+        const similarity = calculateSimilarity(searchTerm, stockName);
+        return { ...stockItem, similarity };
+      });
+
+      stocksWithScore.sort((a, b) => b.similarity - a.similarity);
+      const bestMatch = stocksWithScore[0];
+      
+      if (bestMatch && bestMatch.similarity > 0.3) {
+        delete bestMatch.similarity;
+        stock = bestMatch;
+      }
+    }
+
     if (!stock) {
       return res.status(404).json({
         success: false,
-        error: `Stock with ticker "${ticker}" not found`
+        error: `Stock with ticker/name "${ticker}" not found`
       });
     }
 
     // Convert Mongoose document to plain object
-    const stockData = stock.toObject();
+    const stockData = stock.toObject ? stock.toObject() : stock;
     
     // Remove MongoDB internal fields
     delete stockData.__v;
+    if (stockData.similarity !== undefined) {
+      delete stockData.similarity;
+    }
 
     res.json({
       success: true,
