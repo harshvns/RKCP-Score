@@ -1,12 +1,107 @@
 import express from 'express';
 import StockRow from '../models/StockRow.js';
+import { fetchHistoricalPrices, calculateDMA, getTrendAnalysis, getTickerSymbol } from '../services/stockPriceService.js';
 
 const router = express.Router();
 
 /**
- * GET /api/stock
- * Get all stocks (optional endpoint)
+ * GET /api/stock/top10
+ * Get top 10 stocks by RKCP score with trend analysis (50 DMA and 200 DMA)
  */
+router.get('/top10', async (req, res) => {
+  try {
+    // Get all stocks and sort by RKCP score (Total Mark out of 10)
+    const allStocks = await StockRow.find({}).lean();
+    
+    // Sort by RKCP score (descending) and get top 10
+    const top10Stocks = allStocks
+      .map(stock => {
+        const rkcpScore = stock['Total Mark out of 10'] || 
+                         stock['Total Mark'] || 
+                         stock.totalMark || 
+                         0;
+        return { ...stock, rkcpScore: parseFloat(rkcpScore) || 0 };
+      })
+      .sort((a, b) => b.rkcpScore - a.rkcpScore)
+      .slice(0, 10);
+    
+    // Fetch trend analysis for each stock
+    const stocksWithTrend = await Promise.all(
+      top10Stocks.map(async (stock) => {
+        const companyName = stock.Name || stock.name || stock.NAME || 'Unknown';
+        const ticker = getTickerSymbol(companyName);
+        
+        try {
+          // Fetch historical price data (need at least 200 days for 200 DMA)
+          const priceData = await fetchHistoricalPrices(ticker, 250);
+          
+          if (priceData.length < 200) {
+            // Insufficient data
+            return {
+              ...stock,
+              trendAnalysis: {
+                trend: 'unknown',
+                signal: 'insufficient_data',
+                message: 'Insufficient historical data for DMA calculation',
+                ticker
+              }
+            };
+          }
+          
+          // Get current price (last close price)
+          const currentPrice = priceData[priceData.length - 1].close;
+          
+          // Calculate DMAs
+          const dma50 = calculateDMA(priceData, 50);
+          const dma200 = calculateDMA(priceData, 200);
+          
+          // Get trend analysis
+          const trendAnalysis = getTrendAnalysis(dma50, dma200, currentPrice);
+          trendAnalysis.ticker = ticker;
+          trendAnalysis.dataPoints = priceData.length;
+          
+          return {
+            ...stock,
+            trendAnalysis
+          };
+        } catch (error) {
+          console.error(`Error analyzing trend for ${companyName}:`, error.message);
+          return {
+            ...stock,
+            trendAnalysis: {
+              trend: 'unknown',
+              signal: 'error',
+              message: `Error fetching price data: ${error.message}`,
+              ticker
+            }
+          };
+        }
+      })
+    );
+    
+    // Remove MongoDB internal fields
+    const cleanedStocks = stocksWithTrend.map(stock => {
+      const cleaned = { ...stock };
+      delete cleaned.__v;
+      delete cleaned._id;
+      return cleaned;
+    });
+    
+    res.json({
+      success: true,
+      count: cleanedStocks.length,
+      data: cleanedStocks
+    });
+    
+  } catch (error) {
+    console.error('Error fetching top 10 stocks with trend:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
 
 /**
  * GET /api/stock/search?name=stockname
@@ -293,4 +388,3 @@ router.get('/', async (req, res) => {
   
 
 export default router;
-

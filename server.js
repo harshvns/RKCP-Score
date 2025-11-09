@@ -48,6 +48,7 @@ app.get('/', (req, res) => {
     message: 'Stock API Server',
     endpoints: {
       health: '/health',
+      getTop10WithTrend: '/api/stock/top10',
       getStockByTicker: '/api/stock/:ticker',
       searchStockByName: '/api/stock/search?name=stockname',
       getAllStocks: '/api/stock'
